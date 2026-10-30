@@ -114,13 +114,25 @@ def test_broken_item_is_not_repaired_by_layer_one():
 # Tolerant path
 # ---------------------------------------------------------------------------
 
-def test_list_drops_only_the_bad_item_and_records_a_warning():
+def test_list_keeps_the_bad_item_as_raw_dict_and_records_a_warning():
+    """RA Capital fork: the bad item stays in the list as a trimmed dict."""
     items = _three_apps_with_one_broken()
 
     parsed = _deserialize(_api_client(), items, "List[Application]")
 
-    assert len(parsed) == 2
-    assert [app.id for app in parsed] == ["0oa000000000000000003", "0oa000000000000000004"]
+    assert len(parsed) == 3
+    good_one, fallback, good_two = parsed
+    assert good_one.id == "0oa000000000000000003"
+    assert good_two.id == "0oa000000000000000004"
+
+    assert isinstance(fallback, dict)
+    assert fallback["id"] == "0oa000000000000000009"
+    assert fallback["signOnMode"] == "SAML_2_0"
+    assert "label" in fallback["parse_error"]
+    assert fallback["parse_error"].startswith("Application:")
+    # Only the trimmed field set survives — no settings, credentials or _links.
+    assert "settings" not in fallback
+    assert "_links" not in fallback
 
     warnings = get_deserialization_warnings()
     assert len(warnings) == 1
@@ -151,7 +163,8 @@ def test_tolerance_generalizes_beyond_applications():
 
     parsed = _deserialize(_api_client(), [good, broken], "List[Policy]")
 
-    assert len(parsed) == 1
+    assert len(parsed) == 2
+    assert isinstance(parsed[1], dict) and "parse_error" in parsed[1]
     warnings = get_deserialization_warnings()
     assert len(warnings) == 1
     assert warnings[0]["model"] == "Policy"
@@ -224,7 +237,7 @@ def test_strict_flag_is_read_at_call_time(monkeypatch):
         _deserialize(_api_client(), items, "List[Application]")
 
     monkeypatch.delenv(STRICT_ENV_VAR)
-    assert len(_deserialize(_api_client(), items, "List[Application]")) == 2
+    assert len(_deserialize(_api_client(), items, "List[Application]")) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -250,11 +263,14 @@ async def test_json_response_attaches_warnings_to_dict_result():
     async def fake_tool():
         items = _three_apps_with_one_broken()
         parsed = _deserialize(_api_client(), items, "List[Application]")
-        return {"items": [app.id for app in parsed], "total_fetched": len(parsed)}
+        return {"items": parsed, "total_fetched": len(parsed)}
 
     result = await fake_tool()
 
-    assert result["total_fetched"] == 2
+    assert result["total_fetched"] == 3
+    # The fallback dict survives serialization next to the parsed models.
+    assert result["items"][1]["id"] == "0oa000000000000000009"
+    assert "parse_error" in result["items"][1]
     assert len(result["warnings"]) == 1
     assert result["warnings"][0]["model"] == "Application"
     assert result["warnings"][0]["raw_item"]["id"] == "0oa000000000000000009"

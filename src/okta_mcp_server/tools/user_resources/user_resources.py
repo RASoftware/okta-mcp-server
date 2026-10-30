@@ -10,6 +10,7 @@ from mcp.server.fastmcp import Context
 
 from okta_mcp_server.server import mcp
 from okta_mcp_server.utils.client import get_okta_client
+from okta_mcp_server.utils.compact import compact_group, compact_list
 from okta_mcp_server.utils.scope_guard import require_scopes
 from okta_mcp_server.utils.serialization import json_response
 from okta_mcp_server.utils.validation import validate_ids
@@ -19,7 +20,7 @@ from okta_mcp_server.utils.validation import validate_ids
 @require_scopes("okta.users.read", error_return_type="list")
 @validate_ids("user_id")
 @json_response
-async def list_user_groups(user_id: str, ctx: Context = None) -> list:
+async def list_user_groups(user_id: str, ctx: Context = None, compact: bool = True) -> list:
     """List all groups that a user is a member of.
 
     This tool retrieves all groups of which the specified user is a member.
@@ -30,9 +31,12 @@ async def list_user_groups(user_id: str, ctx: Context = None) -> list:
 
     Parameters:
         user_id (str, required): The ID, login, or login shortname of the user.
+        compact (bool, optional): If True (default), each group carries only id, type,
+            created, lastUpdated, lastMembershipUpdated and profile.name/description.
+            Pass compact=False for full group objects, or call get_group(group_id).
 
     Returns:
-        List of group objects the user belongs to.
+        List of group objects the user belongs to (compact by default).
     """
     logger.info(f"Listing groups for user: {user_id}")
 
@@ -53,6 +57,8 @@ async def list_user_groups(user_id: str, ctx: Context = None) -> list:
             return []
 
         logger.info(f"Successfully retrieved {len(groups)} groups for user {user_id}")
+        if compact:
+            return compact_list(groups, compact_group)
         return groups
 
     except Exception as e:

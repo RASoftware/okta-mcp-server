@@ -67,6 +67,14 @@ TOOL_SCOPE_REGISTRY: dict[str, str] = {
     "get_catalog_app":                      "okta.apps.read",
     "install_oin_app":                      "okta.apps.manage",
     # ------------------------------------------------------------------
+    # Audit (RA Capital fork)  (src/okta_mcp_server/tools/audit/audit.py)
+    # Read-only. Raw JSON through the request executor, no SDK models.
+    # ------------------------------------------------------------------
+    "list_user_app_links":                  "okta.users.read",
+    "list_application_users":               "okta.apps.read",
+    "list_application_groups":              "okta.apps.read",
+    "app_last_sso":                         "okta.logs.read",
+    # ------------------------------------------------------------------
     # Policies  (src/okta_mcp_server/tools/policies/policies.py)
     # ------------------------------------------------------------------
     "list_policies":                        "okta.policies.read",

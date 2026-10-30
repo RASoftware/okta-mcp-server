@@ -1,6 +1,22 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## v1.1.7-rac.1 (RA Capital fork)
+
+Based on upstream v1.1.7. Read-only additions for Okta access audits; no tool in this release needs a `.manage` scope.
+
+### Carried from upstream pull requests (not yet merged upstream)
+- okta/okta-mcp-server#107 — `utils/okta_compat.py`: relaxes over-strict generated SDK models that reject valid API responses.
+- okta/okta-mcp-server#108 — `utils/tolerant_deserialization.py`: per-item tolerance for `List[...]` responses so one unparseable OIN SAML/SWA app no longer fails the whole page (issue #48).
+
+### Fork changes
+- Tolerant deserialization now **keeps** an unparseable list item as a trimmed raw dict (`id`, `label`, `name`, `signOnMode`, `status`, `features`, `created`, `lastUpdated`, `type`, `profile`) with a `parse_error` field, instead of dropping it. The `warnings` entry with the full raw payload is still recorded. Against a 165-app org this surfaces 23 apps upstream silently omitted.
+- `get_application` falls back to the raw JSON object (with `parse_error` added) when the SDK model rejects the app.
+- `compact=True` default on `list_applications`, `list_group_apps` and `list_user_groups`; items carry only inventory fields (`visibility.hide`, and `settings.app.url` for bookmarks, included). `compact=False` returns full objects. Group profiles are unwrapped from the SDK's `actual_instance` anyOf wrapper.
+- `fetch_all` is no longer all-or-nothing: pages fetched before a failure are returned, `pagination_info.errors` lists each failed page, and `next_cursor` becomes the resume point.
+- New read-only tools in `tools/audit/audit.py`, using raw JSON via the SDK request executor (`utils/raw_request.py`, with 429 backoff): `list_user_app_links` (okta.users.read), `list_application_users` and `list_application_groups` (okta.apps.read), `app_last_sso` (okta.logs.read).
+- Tests: `tests/test_rac_fork.py` (19 tests); tolerant-deserialization tests updated for keep-not-drop. Suite total 627, all passing.
+
 ## v1.1.7
 
 ### Security

@@ -12,6 +12,7 @@ from mcp.server.fastmcp import Context
 
 from okta_mcp_server.server import mcp
 from okta_mcp_server.utils.client import get_okta_client
+from okta_mcp_server.utils.compact import compact_application, compact_list
 from okta_mcp_server.utils.elicitation import DeleteConfirmation, elicit_or_fallback
 from okta_mcp_server.utils.messages import DELETE_GROUP
 from okta_mcp_server.utils.pagination import build_query_params, create_paginated_response, extract_after_cursor, paginate_all_results
@@ -485,6 +486,7 @@ async def list_group_apps(
     after: Optional[str] = None,
     limit: Optional[int] = None,
     fetch_all: bool = False,
+    compact: bool = True,
 ) -> dict:
     """List all applications assigned to a group with pagination support.
 
@@ -493,18 +495,24 @@ async def list_group_apps(
         after (str, optional): Pagination cursor for the next page.
         limit (int, optional): Maximum number of apps to return per page (max 200). Default: 20.
         fetch_all (bool, optional): If True, automatically fetch all pages. Default: False.
+        compact (bool, optional): If True (default), each item carries only id, label, name,
+            signOnMode, status, features, created, lastUpdated, visibility.hide and, for
+            BOOKMARK apps, settings.app.url. Pass compact=False for full application objects.
 
     Returns:
         Dict containing:
-            - items (List): List of application objects
+            - items (List): List of application objects (compact by default). An item with
+              a ``parse_error`` field is one the Okta SDK could not parse; it is still
+              listed with its basic fields.
             - total_fetched (int): Number of apps returned
             - has_more (bool): Whether more results are available
             - next_cursor (str | None): Cursor for the next page
             - fetch_all_used (bool): Whether fetch_all was used
             - pagination_info (Dict): Detailed pagination metadata (when fetch_all=True)
+            - errors (List): Present only when fetch_all hit a failing page
     """
     logger.info(f"Listing applications assigned to group: {group_id}")
-    logger.debug(f"fetch_all: {fetch_all}, after: '{after}', limit: {limit}")
+    logger.debug(f"fetch_all: {fetch_all}, after: '{after}', limit: {limit}, compact: {compact}")
 
     if limit is None:
         limit = 20
@@ -546,9 +554,13 @@ async def list_group_apps(
                 response, apps, next_page_fn=_next_page, on_page=_on_page
             )
             logger.info(f"Successfully retrieved {len(all_apps)} apps for group {group_id} across {pagination_info['pages_fetched']} pages")
+            if compact:
+                all_apps = compact_list(all_apps, compact_application)
             return create_paginated_response(all_apps, response, fetch_all_used=True, pagination_info=pagination_info)
 
         logger.info(f"Successfully retrieved {len(apps)} applications for group {group_id}")
+        if compact:
+            apps = compact_list(apps, compact_application)
         return create_paginated_response(apps, response, fetch_all_used=fetch_all)
     except Exception as e:
         logger.error(f"Exception while listing applications for group {group_id}: {type(e).__name__}: {e}")

@@ -43,6 +43,17 @@ result to salvage from a single object — dropping it would turn a hard error i
 a silent ``None`` — and those paths are already covered by the targeted model
 patches in :mod:`okta_mcp_server.utils.okta_compat`.
 
+RA Capital fork: bad items are kept, not dropped
+------------------------------------------------
+Upstream PR 108 drops an unparseable item from the list and only reports it in
+the warnings array.  For audit work ("is Wispr Flow still assigned to anyone?")
+a silently shorter inventory is a trap, so this fork keeps the item in the list
+as a **trimmed raw dict** built by :func:`_fallback_item`: the handful of fields
+every inventory needs (``id``, ``label``, ``name``, ``signOnMode``, ``status``,
+``features``, ``created``, ``lastUpdated``, plus ``profile``/``type`` for groups
+and users) and a ``parse_error`` string saying why the SDK rejected it.  The
+warning entry is still recorded so callers can tell the two apart.
+
 Warnings and redaction
 ----------------------
 Failures are collected in a :class:`contextvars.ContextVar`, so they are
@@ -126,17 +137,52 @@ def get_deserialization_warnings() -> List[Dict[str, Any]]:
     return list(collected) if collected else []
 
 
+#: Top-level keys kept on an item the SDK could not parse.  Covers apps
+#: (label, signOnMode, features), groups/users (profile, type) and the common
+#: audit fields.  Anything else is left out so a broken item never bloats a
+#: compact listing.
+_FALLBACK_KEYS = (
+    "id", "label", "name", "signOnMode", "status", "features",
+    "created", "lastUpdated", "type", "profile",
+)
+
+#: Inside ``profile`` (groups and users) keep only the identifying fields.
+_FALLBACK_PROFILE_KEYS = ("name", "description", "login", "email", "firstName", "lastName")
+
+
+def _error_summary(exc: BaseException) -> str:
+    return str(exc).replace("\n", " ")[:_ERROR_SUMMARY_LIMIT]
+
+
+def _fallback_item(model_name: str, exc: BaseException, payload: Any) -> Dict[str, Any]:
+    """Build the trimmed raw dict that stands in for an unparseable list item.
+
+    The dict is JSON-native already, so ``to_jsonable`` passes it through
+    unchanged, and it sits in ``items`` next to the parsed SDK models.
+    """
+    item: Dict[str, Any] = {}
+    if isinstance(payload, dict):
+        for key in _FALLBACK_KEYS:
+            if key in payload:
+                item[key] = payload[key]
+        profile = item.get("profile")
+        if isinstance(profile, dict):
+            item["profile"] = {k: v for k, v in profile.items() if k in _FALLBACK_PROFILE_KEYS}
+    item["parse_error"] = f"{model_name}: {_error_summary(exc)}"
+    return item
+
+
 def _record_warning(model_name: str, exc: BaseException, payload: Any) -> None:
-    """Record one dropped item, and log it **without** the raw payload above DEBUG."""
-    summary = str(exc).replace("\n", " ")[:_ERROR_SUMMARY_LIMIT]
+    """Record one unparseable item, and log it **without** the raw payload above DEBUG."""
+    summary = _error_summary(exc)
     entry: Dict[str, Any] = {
         "type": "deserialization_error",
         "model": model_name,
         "error": summary,
         "message": (
             f"An item of type {model_name!r} returned by Okta did not match the SDK's "
-            f"model and was omitted from the results. The raw payload is included "
-            f"under 'raw_item'."
+            f"model. It is still present in 'items' as a trimmed raw dict with a "
+            f"'parse_error' field; the full raw payload is included under 'raw_item'."
         ),
         "raw_item": payload,
     }
@@ -147,8 +193,8 @@ def _record_warning(model_name: str, exc: BaseException, payload: Any) -> None:
     collected.append(entry)
 
     # The raw payload is real tenant data — DEBUG only, never INFO or above.
-    logger.warning(f"[tolerant_deserialization] dropped one {model_name}: {summary}")
-    logger.debug(f"[tolerant_deserialization] dropped {model_name} raw payload: {payload!r}")
+    logger.warning(f"[tolerant_deserialization] kept one unparseable {model_name} as raw dict: {summary}")
+    logger.debug(f"[tolerant_deserialization] unparseable {model_name} raw payload: {payload!r}")
 
 
 def install_tolerant_deserialization() -> bool:
@@ -179,7 +225,7 @@ def install_tolerant_deserialization() -> bool:
         return False
 
     def tolerant_deserialize(self, data, klass):
-        """Deserialize ``data`` as ``klass``, dropping unparseable list elements.
+        """Deserialize ``data`` as ``klass``, keeping unparseable list elements as raw dicts.
 
         Signature intentionally mirrors the SDK's own ``__deserialize`` — it is
         installed in its place and must accept the same positional arguments.
@@ -206,6 +252,9 @@ def install_tolerant_deserialization() -> bool:
                     # discriminator), and that is equally a per-item problem.
                     except (ValidationError, ValueError) as exc:
                         _record_warning(sub_kls, exc, item)
+                        # RA Capital fork: keep the item so the inventory stays
+                        # complete; the caller sees `parse_error` on it.
+                        parsed.append(_fallback_item(sub_kls, exc, item))
                 return parsed
 
         return original(self, data, klass)

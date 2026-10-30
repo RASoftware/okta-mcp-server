@@ -7,6 +7,25 @@
 
 </div>
 
+> ## RA Capital fork
+>
+> This is **RASoftware/okta-mcp-server**, a fork of [okta/okta-mcp-server](https://github.com/okta/okta-mcp-server)
+> maintained by RA Capital IT for read-only Okta audit work. It tracks upstream releases
+> (currently v1.1.7) and adds, on top:
+>
+> | Change | Why | Remove when |
+> | --- | --- | --- |
+> | Upstream PR [#107](https://github.com/okta/okta-mcp-server/pull/107) model relaxations (`utils/okta_compat.py`) | The pinned Okta SDK's generated models reject valid API responses | Upstream merges #107 or the SDK fixes the models |
+> | Upstream PR [#108](https://github.com/okta/okta-mcp-server/pull/108) per-item tolerant list deserialization (`utils/tolerant_deserialization.py`) | One bad OIN SAML/SWA app no longer fails a whole page ([issue #48](https://github.com/okta/okta-mcp-server/issues/48)) | Upstream merges #108 |
+> | Unparseable list items are **kept** as trimmed dicts with a `parse_error` field (fork change inside `tolerant_deserialization.py`) | An inventory that silently drops apps is a trap for access reviews | Upstream adopts an equivalent, or the SDK parses everything |
+> | `get_application` falls back to raw JSON (plus `parse_error`) when the SDK rejects the app | Same apps were unreadable one at a time too | Same as above |
+> | `compact=True` default on `list_applications`, `list_group_apps`, `list_user_groups` (`utils/compact.py`) | Full app objects are several KB each; 165 of them blow the context budget | Never has to — it is an output option, not a workaround |
+> | `fetch_all` keeps partial pages and reports an `errors` array plus a resume cursor (`utils/pagination.py`) | All-or-nothing pagination loses everything on one failed page | Upstream adopts something similar |
+> | Read-only audit tools `list_user_app_links`, `list_application_users`, `list_application_groups`, `app_last_sso` (`tools/audit/audit.py`, `utils/raw_request.py`) | Assignment and last-use questions the upstream tool set cannot answer | Upstream ships equivalents |
+>
+> Nothing in the fork requires a `.manage` scope. Releases are tagged `v<upstream>-rac.<n>` (e.g. `v1.1.7-rac.1`).
+> See `CHANGELOG.md` for the fork entries.
+
 ## :tada: __It's Official__ :tada:
 The Okta Open Source MCP Server integrates with LLMs and AI agents, allowing you to perform various Okta management operations using natural language and is Generally Available (GA).
 
@@ -602,6 +621,17 @@ The Okta Open Source MCP Server provides the following tools for LLMs to interac
 | `list_catalog_apps`           | Browse the OIN app catalog (find an app's `name` + features) | - `Find a SCIM 2.0 test app in the catalog` <br> - `Search the OIN catalog for Slack`                                                                        |
 | `get_catalog_app`             | Get a single OIN catalog app definition (incl. schema) | - `Show the catalog definition for the SCIM 2.0 test app`                                                                                                    |
 | `install_oin_app`             | Install an instance of an OIN catalog app (e.g. a provisioning-capable SCIM app) | - `Install the SCIM 2.0 test app as "HR Directory Sync"` <br> - `Add the Slack OIN app to my org`                                                            |
+
+### Audit (RA Capital fork)
+
+> **Required scopes:** `okta.users.read` (`list_user_app_links`) · `okta.apps.read` (`list_application_users`, `list_application_groups`) · `okta.logs.read` (`app_last_sso`). All read-only.
+
+| Tool                          | Description                                       | Usage Examples                                                                                                                                                |
+| ----------------------------- | ------------------------------------------------- |---------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `list_user_app_links`         | Apps on a user's End-User Dashboard (matches the Admin Console Applications tab) | - `What apps does jdoe@company.com have?`                                                                                                           |
+| `list_application_users`      | Users assigned to an app, with `scope` USER (direct) vs GROUP (inherited) and counts | - `Who still has the legacy Slack app, and is it direct or via a group?`                                                                          |
+| `list_application_groups`     | Groups assigned to an app (`expand=group` adds names) | - `Which groups are assigned to app 0oa...?`                                                                                                              |
+| `app_last_sso`                | Newest `user.authentication.sso` event for an app in the last N days (default 90), or null | - `When did anyone last sign in to Box?` <br> - `Which of these apps have had no SSO in 90 days?`                                          |
 
 ### Policies
 

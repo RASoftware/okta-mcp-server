@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 import okta.models as okta_models
 from loguru import logger
 from mcp.server.fastmcp import Context
+from pydantic import ValidationError
 
 from okta_mcp_server.server import mcp
 
@@ -44,9 +45,11 @@ def _build_application_model(app_config: Dict[str, Any]) -> Any:
 
 
 from okta_mcp_server.utils.client import get_okta_client
+from okta_mcp_server.utils.compact import compact_application, compact_list
 from okta_mcp_server.utils.elicitation import DeactivateConfirmation, DeleteConfirmation, elicit_or_fallback
 from okta_mcp_server.utils.messages import DEACTIVATE_APPLICATION, DELETE_APPLICATION
 from okta_mcp_server.utils.pagination import build_query_params, create_paginated_response, extract_after_cursor, paginate_all_results
+from okta_mcp_server.utils.raw_request import build_url, raw_get
 from okta_mcp_server.utils.scope_guard import require_scopes
 from okta_mcp_server.utils.serialization import json_response, none_body_error
 from okta_mcp_server.utils.validation import validate_ids
@@ -64,6 +67,7 @@ async def list_applications(
     expand: Optional[str] = None,
     include_non_deleted: Optional[bool] = None,
     fetch_all: bool = False,
+    compact: bool = True,
 ) -> dict:
     """List all applications from the Okta organization.
 
@@ -76,24 +80,33 @@ async def list_applications(
         object to include the group's profile
         include_non_deleted (bool, optional): Include non-deleted applications in the results
         fetch_all (bool, optional): If True, automatically fetch all pages of results. Default: False.
+        compact (bool, optional): If True (default), each item carries only id, label, name,
+            signOnMode, status, features, created, lastUpdated, visibility.hide and, for
+            BOOKMARK apps, settings.app.url. Pass compact=False for full application objects,
+            or call get_application(app_id) for one app.
 
     Examples:
         For pagination:
         - First call: list_applications()
         - Next page: list_applications(after="cursor_value")
         - All pages: list_applications(fetch_all=True)
+        - Full objects: list_applications(compact=False)
 
     Returns:
         Dict containing:
-        - items: List of application objects
+        - items: List of application objects (compact by default). An item with a
+          ``parse_error`` field is one the Okta SDK could not parse; it is still
+          listed with its basic fields so inventories stay complete.
         - total_fetched: Number of applications returned
         - has_more: Boolean indicating if more results are available
         - next_cursor: Cursor for the next page (if has_more is True)
         - fetch_all_used: Boolean indicating if fetch_all was used
         - pagination_info: Additional pagination metadata (when fetch_all=True)
+        - errors: Present only when fetch_all hit a failing page; the pages fetched
+          before it are still in items and next_cursor is the resume point.
     """
     logger.info("Listing applications from Okta organization")
-    logger.debug(f"Query parameters: q='{q}', filter='{filter}', limit={limit}, fetch_all={fetch_all}")
+    logger.debug(f"Query parameters: q='{q}', filter='{filter}', limit={limit}, fetch_all={fetch_all}, compact={compact}")
 
     # Validate limit parameter range
     if limit is not None:
@@ -145,9 +158,13 @@ async def list_applications(
             logger.info(
                 f"Successfully retrieved {len(all_apps)} applications across {pagination_info['pages_fetched']} pages"
             )
+            if compact:
+                all_apps = compact_list(all_apps, compact_application)
             return create_paginated_response(all_apps, response, fetch_all_used=True, pagination_info=pagination_info)
         else:
             logger.info(f"Successfully retrieved {app_count} applications")
+            if compact:
+                apps = compact_list(apps, compact_application)
             return create_paginated_response(apps, response, fetch_all_used=fetch_all)
     except Exception as e:
         logger.error(f"Exception while listing applications: {type(e).__name__}: {e}")
@@ -168,6 +185,8 @@ async def get_application(ctx: Context, app_id: str, expand: Optional[str] = Non
 
     Returns:
         Dictionary containing the application details or error information.
+        If the Okta SDK cannot parse the app (some OIN SAML/SWA apps), the raw
+        JSON from Okta is returned instead with a ``parse_error`` field added.
     """
     logger.info(f"Getting application with ID: {app_id}")
 
@@ -180,7 +199,19 @@ async def get_application(ctx: Context, app_id: str, expand: Optional[str] = Non
         if expand:
             query_params["expand"] = expand
 
-        app, _, err = await client.get_application(app_id, **query_params)
+        try:
+            app, _, err = await client.get_application(app_id, **query_params)
+        except (ValidationError, ValueError) as parse_exc:
+            # RA Capital fork: the SDK's generated model rejected a real app.
+            # Re-fetch as raw JSON so the caller still gets the full object.
+            logger.warning(f"SDK could not parse application {app_id}; returning raw JSON: {str(parse_exc)[:200]}")
+            raw, _, raw_err = await raw_get(client, build_url(f"/api/v1/apps/{app_id}", query_params))
+            if raw_err:
+                return {"error": str(raw_err)}
+            if not isinstance(raw, dict):
+                return {"error": str(parse_exc)}
+            raw["parse_error"] = f"Application: {str(parse_exc).replace(chr(10), ' ')[:512]}"
+            return raw
 
         if err:
             logger.error(f"Okta API error while getting application {app_id}: {err}")

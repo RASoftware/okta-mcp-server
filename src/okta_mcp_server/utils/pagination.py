@@ -98,7 +98,26 @@ async def paginate_all_results(
     pages_fetched = 1
     response = initial_response
 
-    pagination_info = {"pages_fetched": 1, "total_items": len(all_items), "stopped_early": False, "stop_reason": None}
+    # RA Capital fork: a failed page no longer makes the call all-or-nothing.
+    # Every page fetched before the failure is kept, the failure is appended to
+    # ``errors`` and, when we know it, ``resume_cursor`` is the ``after`` value
+    # a caller can pass to pick up where this stopped.
+    pagination_info = {
+        "pages_fetched": 1,
+        "total_items": len(all_items),
+        "stopped_early": False,
+        "stop_reason": None,
+        "errors": [],
+    }
+
+    def _record_page_error(reason: str, cursor_value=None) -> None:
+        pagination_info["stopped_early"] = True
+        pagination_info["stop_reason"] = reason
+        entry = {"page": pages_fetched + 1, "error": reason}
+        if cursor_value:
+            entry["after"] = cursor_value
+            pagination_info["resume_cursor"] = cursor_value
+        pagination_info["errors"].append(entry)
 
     if not response:
         return all_items, pagination_info
@@ -115,8 +134,7 @@ async def paginate_all_results(
 
                     if next_err:
                         logger.warning(f"Error fetching page {pages_fetched + 1}: {next_err}")
-                        pagination_info["stopped_early"] = True
-                        pagination_info["stop_reason"] = f"API error: {next_err}"
+                        _record_page_error(f"API error: {next_err}")
                         break
 
                     if next_items:
@@ -133,8 +151,7 @@ async def paginate_all_results(
 
                 except Exception as e:
                     logger.error(f"Exception during pagination on page {pages_fetched + 1}: {e}")
-                    pagination_info["stopped_early"] = True
-                    pagination_info["stop_reason"] = f"Exception: {e}"
+                    _record_page_error(f"Exception: {e}")
                     break
 
             if pages_fetched >= max_pages and response.has_next():
@@ -160,8 +177,7 @@ async def paginate_all_results(
 
                     if next_err:
                         logger.warning(f"Error fetching page {pages_fetched + 1}: {next_err}")
-                        pagination_info["stopped_early"] = True
-                        pagination_info["stop_reason"] = f"API error: {next_err}"
+                        _record_page_error(f"API error: {next_err}", cursor)
                         break
 
                     if next_items:
@@ -181,13 +197,13 @@ async def paginate_all_results(
 
                 except Exception as e:
                     logger.error(f"Exception during pagination on page {pages_fetched + 1}: {e}")
-                    pagination_info["stopped_early"] = True
-                    pagination_info["stop_reason"] = f"Exception: {e}"
+                    _record_page_error(f"Exception: {e}", cursor)
                     break
 
-            if cursor and pages_fetched >= max_pages:
+            if cursor and pages_fetched >= max_pages and not pagination_info["stopped_early"]:
                 pagination_info["stopped_early"] = True
                 pagination_info["stop_reason"] = f"Reached maximum page limit ({max_pages})"
+                pagination_info["resume_cursor"] = cursor
                 logger.warning(f"Stopped pagination at {max_pages} pages limit")
 
         except Exception as e:
@@ -256,6 +272,17 @@ def create_paginated_response(
     # Add detailed pagination info if available
     if pagination_info:
         result["pagination_info"] = pagination_info
+
+        # RA Capital fork: surface a partial fetch_all honestly.  ``errors``
+        # lists each page that failed, and ``next_cursor`` becomes the point
+        # to resume from instead of pretending the walk finished.
+        errors = pagination_info.get("errors")
+        if errors:
+            result["errors"] = errors
+        resume_cursor = pagination_info.get("resume_cursor")
+        if resume_cursor:
+            result["has_more"] = True
+            result["next_cursor"] = resume_cursor
 
     return result
 
