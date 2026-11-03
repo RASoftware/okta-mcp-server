@@ -58,13 +58,15 @@ Warnings and redaction
 ----------------------
 Failures are collected in a :class:`contextvars.ContextVar`, so they are
 async-safe and scoped per request rather than shared process-wide.  Each entry
-carries the target model name, a compact rendering of the validation error, and
-the item's **raw payload dict**.
+carries the target model name and a one-line summary of the validation error.
 
-That raw payload is real tenant data in production.  It is surfaced to the
-operator through the tool's JSON result — which is the point — but it is **never**
-written to the logs at INFO or above: the log line emitted on a drop names only
-the model and the error summary, and the payload appears solely in DEBUG output.
+RA Capital fork: the item's **raw payload dict** is only included (as
+``raw_item``) when the tool opted in via :func:`set_include_raw_items`, which
+the list tools expose as ``include_raw=True``.  By default it is left out: the
+trimmed item in ``items`` already carries ``parse_error``, and 23 raw app
+payloads (credentials, ``_links``, settings) were more than doubling the size
+of a list response.  The raw payload is real tenant data and is **never**
+written to the logs at INFO or above; it appears solely in DEBUG output.
 
 Strict mode
 -----------
@@ -89,6 +91,7 @@ __all__ = [
     "get_deserialization_warnings",
     "install_tolerant_deserialization",
     "reset_deserialization_warnings",
+    "set_include_raw_items",
     "strict_deserialization_enabled",
 ]
 
@@ -96,8 +99,9 @@ __all__ = [
 #: Environment variable that restores the SDK's original hard-fail behavior.
 STRICT_ENV_VAR = "OKTA_MCP_STRICT_DESERIALIZATION"
 
-#: Maximum characters of ``str(exc)`` kept in a warning entry.
-_ERROR_SUMMARY_LIMIT = 512
+#: Maximum characters of the error summary kept in a warning entry / parse_error.
+#: 120 is enough for "<field>: <message>" plus the start of pydantic's enum list.
+_ERROR_SUMMARY_LIMIT = 120
 
 #: Matches the SDK's own ``List[...]`` response-type spelling.
 _LIST_TYPE_RE = re.compile(r"^List\[(.*)]$")
@@ -107,6 +111,12 @@ _LIST_TYPE_RE = re.compile(r"^List\[(.*)]$")
 #: shares a mutable default across contexts.
 _warnings: contextvars.ContextVar[Optional[List[Dict[str, Any]]]] = contextvars.ContextVar(
     "okta_mcp_deserialization_warnings", default=None
+)
+
+#: Per-request switch: should warnings carry the raw payload (``raw_item``)?
+#: Set by the tool via :func:`set_include_raw_items`; reset with the warnings.
+_include_raw: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "okta_mcp_deserialization_include_raw", default=False
 )
 
 #: Set once :func:`install_tolerant_deserialization` has patched ``ApiClient``.
@@ -129,12 +139,30 @@ def reset_deserialization_warnings() -> None:
     invokes a tool, so warnings never leak between requests.
     """
     _warnings.set([])
+    _include_raw.set(False)
+
+
+def set_include_raw_items(include_raw: bool) -> None:
+    """Choose whether this request's warnings carry the raw payload.
+
+    A list tool calls this with its ``include_raw`` argument before talking to
+    Okta.  ``json_response`` resets it to False at the start of every call.
+    """
+    _include_raw.set(bool(include_raw))
 
 
 def get_deserialization_warnings() -> List[Dict[str, Any]]:
-    """Return a copy of the warnings collected in the current context."""
+    """Return a copy of the warnings collected in the current context.
+
+    ``raw_item`` is stripped from each entry unless :func:`set_include_raw_items`
+    was called with True in this context.
+    """
     collected = _warnings.get()
-    return list(collected) if collected else []
+    if not collected:
+        return []
+    if _include_raw.get():
+        return [dict(entry) for entry in collected]
+    return [{k: v for k, v in entry.items() if k != "raw_item"} for entry in collected]
 
 
 #: Top-level keys kept on an item the SDK could not parse.  Covers apps
@@ -151,7 +179,26 @@ _FALLBACK_PROFILE_KEYS = ("name", "description", "login", "email", "firstName", 
 
 
 def _error_summary(exc: BaseException) -> str:
-    return str(exc).replace("\n", " ")[:_ERROR_SUMMARY_LIMIT]
+    """One short line describing why an item failed to parse.
+
+    Pydantic's ``str(ValidationError)`` runs to several hundred characters per
+    item (every failing field, its input value, a docs URL).  Twenty of those
+    in one list response is more text than the items themselves, so keep only
+    the first failing field and its message plus a count of the rest.
+    Anything that is not a ValidationError is cut to its first line.
+    """
+    if isinstance(exc, ValidationError):
+        errors = exc.errors()
+        if errors:
+            first = errors[0]
+            loc = ".".join(str(part) for part in first.get("loc", ()))
+            summary = f"{loc}: {first['msg']}" if loc else str(first.get("msg", ""))
+            if len(errors) > 1:
+                more = len(errors) - 1
+                summary += f" (+{more} more validation error{'s' if more > 1 else ''})"
+            return summary[:_ERROR_SUMMARY_LIMIT]
+    text = str(exc).strip()
+    return (text.splitlines()[0] if text else type(exc).__name__)[:_ERROR_SUMMARY_LIMIT]
 
 
 def _fallback_item(model_name: str, exc: BaseException, payload: Any) -> Dict[str, Any]:
@@ -168,6 +215,17 @@ def _fallback_item(model_name: str, exc: BaseException, payload: Any) -> Dict[st
         profile = item.get("profile")
         if isinstance(profile, dict):
             item["profile"] = {k: v for k, v in profile.items() if k in _FALLBACK_PROFILE_KEYS}
+        # Match the compact application shape: visibility (hide flags) for
+        # every app, and settings.app.url for bookmarks since that is the only
+        # setting that says where a bookmark points.  Nothing else from
+        # settings or credentials is kept.
+        visibility = payload.get("visibility")
+        if isinstance(visibility, dict):
+            item["visibility"] = visibility
+        if payload.get("signOnMode") == "BOOKMARK":
+            app_settings = (payload.get("settings") or {}).get("app") if isinstance(payload.get("settings"), dict) else None
+            if isinstance(app_settings, dict) and "url" in app_settings:
+                item["settings"] = {"app": {"url": app_settings["url"]}}
     item["parse_error"] = f"{model_name}: {_error_summary(exc)}"
     return item
 
@@ -179,11 +237,9 @@ def _record_warning(model_name: str, exc: BaseException, payload: Any) -> None:
         "type": "deserialization_error",
         "model": model_name,
         "error": summary,
-        "message": (
-            f"An item of type {model_name!r} returned by Okta did not match the SDK's "
-            f"model. It is still present in 'items' as a trimmed raw dict with a "
-            f"'parse_error' field; the full raw payload is included under 'raw_item'."
-        ),
+        "message": "Kept in 'items' as a trimmed dict with 'parse_error'; include_raw=True adds the raw payload.",
+        # Stored on every entry; get_deserialization_warnings() strips it unless
+        # the tool asked for it, so the big payload never leaks out by accident.
         "raw_item": payload,
     }
     collected = _warnings.get()

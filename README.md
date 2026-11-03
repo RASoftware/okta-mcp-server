@@ -23,7 +23,7 @@
 > | `fetch_all` keeps partial pages and reports an `errors` array plus a resume cursor (`utils/pagination.py`) | All-or-nothing pagination loses everything on one failed page | Upstream adopts something similar |
 > | Read-only audit tools `list_user_app_links`, `list_application_users`, `list_application_groups`, `app_last_sso` (`tools/audit/audit.py`, `utils/raw_request.py`) | Assignment and last-use questions the upstream tool set cannot answer | Upstream ships equivalents |
 >
-> Nothing in the fork requires a `.manage` scope. Releases are tagged `v<upstream>-rac.<n>` (e.g. `v1.1.7-rac.1`).
+> Nothing in the fork requires a `.manage` scope. Releases are tagged `v<upstream>-rac.<n>` (e.g. `v1.1.7-rac.2`).
 > See `CHANGELOG.md` for the fork entries.
 
 ## :tada: __It's Official__ :tada:
@@ -629,8 +629,8 @@ The Okta Open Source MCP Server provides the following tools for LLMs to interac
 | Tool                          | Description                                       | Usage Examples                                                                                                                                                |
 | ----------------------------- | ------------------------------------------------- |---------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `list_user_app_links`         | Apps on a user's End-User Dashboard (matches the Admin Console Applications tab) | - `What apps does jdoe@company.com have?`                                                                                                           |
-| `list_application_users`      | Users assigned to an app, with `scope` USER (direct) vs GROUP (inherited) and counts | - `Who still has the legacy Slack app, and is it direct or via a group?`                                                                          |
-| `list_application_groups`     | Groups assigned to an app (`expand=group` adds names) | - `Which groups are assigned to app 0oa...?`                                                                                                              |
+| `list_application_users`      | Users assigned to an app: `scope` USER (direct) vs GROUP (inherited), `username`, status, timestamps, plus `scope_counts` | - `Who still has the legacy Slack app, and is it direct or via a group?`                                                   |
+| `list_application_groups`     | Groups assigned to an app with each group's `name` and `type` (one call, via `expand=group`) | - `Which groups are assigned to app 0oa...?`                                                                                       |
 | `app_last_sso`                | Newest `user.authentication.sso` event for an app in the last N days (default 90), or null | - `When did anyone last sign in to Box?` <br> - `Which of these apps have had no SSO in 90 days?`                                          |
 
 ### Policies

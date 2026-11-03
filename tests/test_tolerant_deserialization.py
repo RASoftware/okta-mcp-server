@@ -34,9 +34,12 @@ from okta_mcp_server.utils.okta_compat import apply_okta_model_compat
 from okta_mcp_server.utils.serialization import json_response
 from okta_mcp_server.utils.tolerant_deserialization import (
     STRICT_ENV_VAR,
+    _error_summary,
+    _fallback_item,
     get_deserialization_warnings,
     install_tolerant_deserialization,
     reset_deserialization_warnings,
+    set_include_raw_items,
     strict_deserialization_enabled,
 )
 from tests.conftest import load_fixture
@@ -140,9 +143,9 @@ def test_list_keeps_the_bad_item_as_raw_dict_and_records_a_warning():
     assert entry["type"] == "deserialization_error"
     assert entry["model"] == "Application"
     assert "label" in entry["error"]
-    # The operator gets the untouched raw payload of the dropped record.
-    assert entry["raw_item"] == items[1]
-    assert entry["raw_item"]["id"] == "0oa000000000000000009"
+    # rac.2: the raw payload is opt-in (see test_warnings_omit_raw_item_unless_requested).
+    assert "raw_item" not in entry
+    assert "include_raw=True" in entry["message"]
 
 
 def test_fully_valid_list_produces_no_warnings():
@@ -273,7 +276,7 @@ async def test_json_response_attaches_warnings_to_dict_result():
     assert "parse_error" in result["items"][1]
     assert len(result["warnings"]) == 1
     assert result["warnings"][0]["model"] == "Application"
-    assert result["warnings"][0]["raw_item"]["id"] == "0oa000000000000000009"
+    assert "raw_item" not in result["warnings"][0]
 
 
 @pytest.mark.asyncio
@@ -358,3 +361,70 @@ async def test_json_response_leaves_non_dict_results_untouched():
         return ["a", "b"]
 
     assert await fake_tool() == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# RA Capital fork, rac.2: warning size and fallback shape
+# ---------------------------------------------------------------------------
+
+def test_warnings_omit_raw_item_unless_requested():
+    """raw_item is stored but only returned after set_include_raw_items(True)."""
+    items = _three_apps_with_one_broken()
+    _deserialize(_api_client(), items, "List[Application]")
+
+    assert "raw_item" not in get_deserialization_warnings()[0]
+
+    set_include_raw_items(True)
+    entry = get_deserialization_warnings()[0]
+    assert entry["raw_item"] == items[1]
+    assert entry["raw_item"]["id"] == "0oa000000000000000009"
+
+    # reset_deserialization_warnings (called by json_response) turns it off again.
+    reset_deserialization_warnings()
+    _deserialize(_api_client(), items, "List[Application]")
+    assert "raw_item" not in get_deserialization_warnings()[0]
+
+
+def test_error_summary_is_one_short_line():
+    """A multi-field ValidationError collapses to its first message plus a count."""
+    from okta.models.application import Application
+
+    broken = _three_apps_with_one_broken()[1]
+    broken["status"] = "NOT_A_STATUS"  # a second failing field
+    with pytest.raises(ValidationError) as excinfo:
+        Application.from_dict(broken)
+
+    summary = _error_summary(excinfo.value)
+    assert "\n" not in summary
+    assert len(summary) <= 120
+    assert len(excinfo.value.errors()) >= 2
+    assert "more validation error" in summary
+
+    # Non-pydantic errors: first line only.
+    assert _error_summary(ValueError("first line\nsecond line")) == "first line"
+
+
+def test_fallback_item_keeps_visibility_and_bookmark_url():
+    """The trimmed stand-in record matches the compact application shape."""
+    payload = {
+        "id": "0oa000000000000000010",
+        "label": "A bookmark",
+        "signOnMode": "BOOKMARK",
+        "status": "ACTIVE",
+        "visibility": {"hide": {"iOS": False, "web": True}, "autoLaunch": False},
+        "settings": {"app": {"url": "https://bookmark.example.invalid/", "requestIntegration": False},
+                     "notes": {"admin": "secret-ish"}},
+        "credentials": {"signing": {"kid": "abc"}},
+        "_links": {"self": {"href": "x"}},
+    }
+    item = _fallback_item("BookmarkApplication", ValueError("settings.app.url missing"), payload)
+
+    assert item["visibility"] == {"hide": {"iOS": False, "web": True}, "autoLaunch": False}
+    assert item["settings"] == {"app": {"url": "https://bookmark.example.invalid/"}}
+    assert "credentials" not in item and "_links" not in item
+    assert item["parse_error"] == "BookmarkApplication: settings.app.url missing"
+
+    # Non-bookmark apps keep visibility but never settings.
+    payload["signOnMode"] = "SAML_2_0"
+    item = _fallback_item("SamlApplication", ValueError("x"), payload)
+    assert "visibility" in item and "settings" not in item

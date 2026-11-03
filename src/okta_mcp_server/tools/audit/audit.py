@@ -127,10 +127,10 @@ async def list_application_users(
         limit (int, optional): Page size, max 500. Default: 500.
         expand (str, optional): Pass "user" to embed each user's profile; compact
             output then adds a ``login`` field.
-        compact (bool, optional): If True (default) each item carries id (the Okta
-            user ID), scope, status, syncState, created, lastUpdated, statusChanged,
-            passwordChanged, credentials.userName and login (with expand=user).
-            Pass compact=False for the full app-user objects.
+        compact (bool, optional): If True (default) each item carries only id (the
+            Okta user ID), scope, status, username (the app-side credentials.userName),
+            created, lastUpdated and login (with expand=user). Pass compact=False for
+            the full app-user objects (syncState, statusChanged, passwordChanged, ...).
 
     Returns:
         Dict containing items, total_fetched, has_more, next_cursor, fetch_all_used,
@@ -181,29 +181,33 @@ async def list_application_groups(
     fetch_all: bool = True,
     after: Optional[str] = None,
     limit: Optional[int] = None,
-    expand: Optional[str] = None,
+    expand: Optional[str] = "group",
     compact: bool = True,
 ) -> dict:
-    """List the groups assigned to an application.
+    """List the groups assigned to an application, with each group's name and type.
 
-    This is GET /api/v1/apps/{id}/groups. An app with no group assignments and
-    no user assignments is a candidate for cleanup; an inactive app that still
-    has groups here will re-grant access to everyone in them if reactivated.
+    This is GET /api/v1/apps/{id}/groups?expand=group. An app with no group
+    assignments and no user assignments is a candidate for cleanup; an inactive
+    app that still has groups here will re-grant access to everyone in them if
+    reactivated.
 
     Parameters:
         app_id (str, required): The application ID (starts with 0oa).
         fetch_all (bool, optional): Follow all pages. Default: True.
         after (str, optional): Pagination cursor when fetch_all=False.
         limit (int, optional): Page size, max 200. Default: 200.
-        expand (str, optional): Pass "group" to embed each group; compact output
-            then adds a ``groupName`` field. Without it, use get_group(id) for names.
+        expand (str, optional): Default "group", which makes Okta embed each group
+            in the same response so names need no extra calls. Pass None to skip it;
+            compact output then resolves missing names with one GET per group.
         compact (bool, optional): If True (default) each item carries id (the Okta
-            group ID), priority, lastUpdated and groupName (with expand=group).
-            Pass compact=False for the full app-group objects.
+            group ID), name, type (OKTA_GROUP, APP_GROUP, BUILT_IN), priority and
+            lastUpdated. Pass compact=False for the full app-group objects, including
+            the embedded group.
 
     Returns:
         Dict containing items, total_fetched, has_more, next_cursor, fetch_all_used
-        and pagination_info. ``errors`` appears only when a later page failed.
+        and pagination_info. ``errors`` appears only when a later page failed, or when
+        a group's name could not be resolved.
     """
     logger.info(f"Listing groups assigned to application: {app_id}")
     manager = ctx.request_context.lifespan_context.okta_auth_manager
@@ -222,6 +226,12 @@ async def list_application_groups(
 
         if compact:
             items = compact_list(items, compact_app_group)
+            # Fallback when the embedded group is missing (expand=None, or Okta
+            # left it out): one read-only GET /api/v1/groups/{id} per unresolved
+            # row. Normally expand=group covers everything and this loop is idle.
+            lookup_errors = await _fill_missing_group_names(client, items)
+            if lookup_errors:
+                info.setdefault("errors", []).extend(lookup_errors)
 
         logger.info(f"Retrieved {len(items)} app groups for {app_id}")
         result = _paged_result(items, info, fetch_all)
@@ -230,6 +240,28 @@ async def list_application_groups(
     except Exception as e:
         logger.error(f"Exception while listing groups for app {app_id}: {type(e).__name__}: {e}")
         return {"error": str(e)}
+
+
+async def _fill_missing_group_names(client: Any, items: list) -> list:
+    """Add ``name``/``type`` to compact app-group rows that lack them, via get-group calls.
+
+    Returns a list of error dicts for groups that could not be fetched; the row
+    is left without a name rather than failing the whole call.
+    """
+    errors = []
+    for row in items:
+        if not isinstance(row, dict) or "name" in row or not row.get("id"):
+            continue
+        group, _, err = await raw_get(client, f"/api/v1/groups/{row['id']}")
+        if err or not isinstance(group, dict):
+            errors.append({"group_id": row["id"], "error": str(err or "empty response")})
+            continue
+        profile = group.get("profile") if isinstance(group.get("profile"), dict) else {}
+        if profile.get("name") is not None:
+            row["name"] = profile["name"]
+        if group.get("type") is not None:
+            row["type"] = group["type"]
+    return errors
 
 
 def _iso_utc(dt: datetime) -> str:

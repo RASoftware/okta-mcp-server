@@ -18,6 +18,7 @@ from okta_mcp_server.utils.messages import DELETE_GROUP
 from okta_mcp_server.utils.pagination import build_query_params, create_paginated_response, extract_after_cursor, paginate_all_results
 from okta_mcp_server.utils.scope_guard import require_scopes
 from okta_mcp_server.utils.serialization import json_response, none_body_error
+from okta_mcp_server.utils.tolerant_deserialization import set_include_raw_items
 from okta_mcp_server.utils.validation import validate_ids
 
 
@@ -487,6 +488,7 @@ async def list_group_apps(
     limit: Optional[int] = None,
     fetch_all: bool = False,
     compact: bool = True,
+    include_raw: bool = False,
 ) -> dict:
     """List all applications assigned to a group with pagination support.
 
@@ -498,6 +500,8 @@ async def list_group_apps(
         compact (bool, optional): If True (default), each item carries only id, label, name,
             signOnMode, status, features, created, lastUpdated, visibility.hide and, for
             BOOKMARK apps, settings.app.url. Pass compact=False for full application objects.
+        include_raw (bool, optional): If True, each ``warnings`` entry also carries the
+            unparseable app's full raw payload as ``raw_item``. Default False.
 
     Returns:
         Dict containing:
@@ -520,6 +524,7 @@ async def list_group_apps(
         logger.warning(f"Limit {limit} exceeds maximum (200), setting to 200")
         limit = 200
 
+    set_include_raw_items(include_raw)
     manager = ctx.request_context.lifespan_context.okta_auth_manager
 
     try:

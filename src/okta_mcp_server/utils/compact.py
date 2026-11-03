@@ -35,7 +35,9 @@ _GROUP_KEYS = ("id", "type", "created", "lastUpdated", "lastMembershipUpdated")
 _GROUP_PROFILE_KEYS = ("name", "description")
 
 # Fields kept for an app-user assignment (GET /api/v1/apps/{id}/users).
-_APP_USER_KEYS = ("id", "scope", "status", "syncState", "created", "lastUpdated", "statusChanged", "passwordChanged")
+# syncState / statusChanged / passwordChanged were dropped in rac.2: 160
+# assignments at ~300 chars each was 60 KB for one app.
+_APP_USER_KEYS = ("id", "scope", "status", "created", "lastUpdated")
 
 # Fields kept for an app-group assignment (GET /api/v1/apps/{id}/groups).
 _APP_GROUP_KEYS = ("id", "priority", "lastUpdated")
@@ -94,19 +96,19 @@ def compact_group(group: Any) -> Dict[str, Any]:
 
 
 def compact_app_user(app_user: Any) -> Dict[str, Any]:
-    """Trim an app-user assignment.
+    """Trim an app-user assignment to id, scope, status, username and timestamps.
 
     ``id`` is the Okta user ID.  ``scope`` is the field audits care about:
     ``USER`` means a direct assignment, ``GROUP`` means the user got the app
-    through a group.  ``credentials.userName`` is the app-side username when
-    present.  When the call used ``expand=user`` the embedded user's login is
-    surfaced as ``login``.
+    through a group.  ``username`` is the app-side ``credentials.userName``
+    flattened to one key (usually the email).  When the call used
+    ``expand=user`` the embedded user's Okta login is surfaced as ``login``.
     """
     data = _as_dict(app_user)
     out = _pick(data, _APP_USER_KEYS)
     credentials = data.get("credentials")
     if isinstance(credentials, dict) and "userName" in credentials:
-        out["credentials"] = {"userName": credentials["userName"]}
+        out["username"] = credentials["userName"]
     login = _embedded_path(data, "user", "profile", "login")
     if login is not None:
         out["login"] = login
@@ -114,16 +116,23 @@ def compact_app_user(app_user: Any) -> Dict[str, Any]:
 
 
 def compact_app_group(app_group: Any) -> Dict[str, Any]:
-    """Trim an app-group assignment.
+    """Trim an app-group assignment to id, name, type, priority, lastUpdated.
 
-    ``id`` is the Okta group ID.  When the call used ``expand=group`` the
-    embedded group's name is surfaced as ``groupName``.
+    ``id`` is the Okta group ID.  The assignment record itself has no name;
+    ``name`` and ``type`` (OKTA_GROUP, APP_GROUP, BUILT_IN) come from the
+    group Okta embeds when the call used ``expand=group``, which
+    ``list_application_groups`` sends by default.  Keys are left out when the
+    embedded group is missing so the caller can see it was not resolved.
     """
     data = _as_dict(app_group)
     out = _pick(data, _APP_GROUP_KEYS)
-    name = _embedded_path(data, "group", "profile", "name")
-    if name is not None:
-        out["groupName"] = name
+    group = _embedded_path(data, "group")
+    if isinstance(group, dict):
+        name = (group.get("profile") or {}).get("name") if isinstance(group.get("profile"), dict) else None
+        if name is not None:
+            out["name"] = name
+        if group.get("type") is not None:
+            out["type"] = group["type"]
     return out
 
 

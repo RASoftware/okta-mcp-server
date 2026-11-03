@@ -1,6 +1,21 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## v1.1.7-rac.2 (RA Capital fork)
+
+Based on upstream v1.1.7. Fixes from the first test pass against a 165-app org; still read-only, no `.manage` scopes.
+
+### Fixed
+- **Warnings no longer re-expose full payloads.** Each `warnings` entry for an unparseable list item carried the raw Okta object (credentials, `_links`, settings) and ~600 characters of pydantic output; on `list_applications(fetch_all=True)` the warnings were bigger than the items (72 KB vs 61 KB). `raw_item` is now omitted unless the tool is called with `include_raw=True` (new parameter on `list_applications` and `list_group_apps`), and the error text is the first failing field and message plus a count of the rest, capped at 120 characters. The same short summary is what appears in each item's `parse_error`.
+- **`limit` is honoured on `list_applications`.** Upstream raised any `limit` under 20 to 20, so `limit=2` returned 20 items. The value now flows through unchanged (Okta accepts 1 to 200 on this endpoint); `fetch_all=True` without a `limit` uses 200-item pages. `list_group_apps`, `list_application_users`, `list_user_groups` and `list_user_app_links` already passed `limit` through or have no page size.
+- **`list_application_users` is compact.** Default records are `id`, `scope`, `status`, `username` (from `credentials.userName`), `created`, `lastUpdated`; `compact=False` returns the full app-user object. `scope_counts` (`{"USER": n, "GROUP": m}`) is in the response. 160 assignments went from 61 KB to 37 KB.
+- **`list_application_groups` resolves group names.** `expand=group` is now the default, so Okta embeds each group in the same response and compact items carry `name` and `type` (OKTA_GROUP, APP_GROUP, BUILT_IN) with no extra calls. If a row has no embedded group (e.g. `expand=None`), one read-only `GET /api/v1/groups/{id}` fills it in; a failed lookup lands in `errors` instead of failing the call. The `groupName` key from rac.1 is replaced by `name`.
+- **Fallback records keep `visibility`.** The trimmed dict that stands in for an unparseable app now includes `visibility` and, for BOOKMARK apps, `settings.app.url`, matching the compact application shape.
+- **Raw-JSON pagination followed only the first `Link` header.** Okta sends `rel="self"` and `rel="next"` as two separate `Link` headers; aiohttp's `.get()` returns only the first, so `raw_get_pages` (used by `list_application_users` and `list_application_groups`) stopped after one page on apps with more than 500 assignments. `extract_after_cursor` now reads every `Link` value. Found while testing the `limit` fix.
+
+### Tests
+- `tests/test_rac_fork.py` and `tests/test_tolerant_deserialization.py`: 10 new tests covering each fix (opt-in `raw_item`, short error summary, fallback `visibility`/bookmark URL, `limit` pass-through, `include_raw` switch, embedded and per-id group name resolution, compact app-user shape, multi-value `Link` header). Suite total 637, all passing.
+
 ## v1.1.7-rac.1 (RA Capital fork)
 
 Based on upstream v1.1.7. Read-only additions for Okta access audits; no tool in this release needs a `.manage` scope.

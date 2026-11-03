@@ -113,12 +113,27 @@ def test_compact_app_user_and_group_surface_embedded_names():
             "profile": {"big": "blob"}, "_embedded": {"user": {"profile": {"login": "j@example.invalid"}}}}
     out = compact_app_user(user)
     assert out["scope"] == "GROUP"
-    assert out["credentials"] == {"userName": "j@example.invalid"}
+    assert out["username"] == "j@example.invalid"
     assert out["login"] == "j@example.invalid"
-    assert "profile" not in out
+    assert "profile" not in out and "credentials" not in out
 
-    group = {"id": "00g1", "priority": 0, "profile": {}, "_embedded": {"group": {"profile": {"name": "Everyone"}}}}
-    assert compact_app_group(group) == {"id": "00g1", "priority": 0, "groupName": "Everyone"}
+    group = {"id": "00g1", "priority": 0, "profile": {},
+             "_embedded": {"group": {"type": "OKTA_GROUP", "profile": {"name": "Everyone"}}}}
+    assert compact_app_group(group) == {"id": "00g1", "priority": 0, "name": "Everyone", "type": "OKTA_GROUP"}
+    # No embedded group: name/type are simply absent so the caller can tell.
+    assert compact_app_group({"id": "00g2", "priority": 1}) == {"id": "00g2", "priority": 1}
+
+
+def test_compact_app_user_is_small():
+    """rac.2: only id, scope, status, username, created, lastUpdated survive."""
+    user = {"id": "00u1", "scope": "USER", "status": "ACTIVE", "syncState": "DISABLED",
+            "created": "2025-01-01T00:00:00.000Z", "lastUpdated": "2025-02-01T00:00:00.000Z",
+            "statusChanged": "2025-01-01T00:00:00.000Z", "passwordChanged": None,
+            "credentials": {"userName": "a@example.invalid"}, "profile": {}, "_links": {"x": 1}}
+    assert compact_app_user(user) == {
+        "id": "00u1", "scope": "USER", "status": "ACTIVE", "username": "a@example.invalid",
+        "created": "2025-01-01T00:00:00.000Z", "lastUpdated": "2025-02-01T00:00:00.000Z",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +268,7 @@ async def test_list_application_users_counts_scopes_and_compacts():
 
     assert result["scope_counts"] == {"GROUP": 2, "USER": 1}
     assert result["total_fetched"] == 3
-    assert result["items"][0] == {"id": "00u1", "scope": "GROUP", "status": "ACTIVE", "credentials": {"userName": "a"}}
+    assert result["items"][0] == {"id": "00u1", "scope": "GROUP", "status": "ACTIVE", "username": "a"}
     assert "profile" not in result["items"][1]
     assert executor.create_request.await_args.kwargs["url"] == f"/api/v1/apps/{APP_ID}/users?limit=500"
 
@@ -366,3 +381,118 @@ async def test_list_user_groups_compact_default():
         result = await list_user_groups(user_id="00u1", ctx=_ctx())
 
     assert result == [{"id": "00g1", "type": "OKTA_GROUP", "profile": {"name": "IT"}}]
+
+
+# ---------------------------------------------------------------------------
+# rac.2 fixes
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_list_applications_limit_flows_through_to_okta():
+    """limit=2 must reach the Okta query as 2 (upstream raised anything under 20 to 20)."""
+    from okta_mcp_server.tools.applications.applications import list_applications
+
+    client = AsyncMock()
+    client.list_applications.return_value = ([_app_model("0oa1", "One"), _app_model("0oa2", "Two")], _response(), None)
+    with patch("okta_mcp_server.tools.applications.applications.get_okta_client", AsyncMock(return_value=client)):
+        result = await list_applications(ctx=_ctx(), limit=2)
+        assert client.list_applications.await_args.kwargs["limit"] == 2
+        assert result["total_fetched"] == 2
+
+        await list_applications(ctx=_ctx(), limit=999)
+        assert client.list_applications.await_args.kwargs["limit"] == 200
+
+        # No limit + fetch_all: biggest page so the walk takes the fewest calls.
+        await list_applications(ctx=_ctx(), fetch_all=True)
+        assert client.list_applications.await_args.kwargs["limit"] == 200
+
+        # No limit, single page: leave it to Okta's default.
+        await list_applications(ctx=_ctx())
+        assert "limit" not in client.list_applications.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_list_applications_include_raw_switches_warning_payloads():
+    from okta_mcp_server.tools.applications import applications as apps_mod
+
+    client = AsyncMock()
+    client.list_applications.return_value = ([_app_model("0oa1", "One")], _response(), None)
+    with patch.object(apps_mod, "get_okta_client", AsyncMock(return_value=client)), \
+         patch.object(apps_mod, "set_include_raw_items") as switch:
+        await apps_mod.list_applications(ctx=_ctx())
+        switch.assert_called_with(False)
+        await apps_mod.list_applications(ctx=_ctx(), include_raw=True)
+        switch.assert_called_with(True)
+
+
+@pytest.mark.asyncio
+async def test_list_group_apps_include_raw_switch():
+    from okta_mcp_server.tools.groups import groups as groups_mod
+
+    client = AsyncMock()
+    client.list_assigned_applications_for_group.return_value = ([_app_model("0oa1", "One")], _response(), None)
+    with patch.object(groups_mod, "get_okta_client", AsyncMock(return_value=client)), \
+         patch.object(groups_mod, "set_include_raw_items") as switch:
+        await groups_mod.list_group_apps(group_id="00g00000000000000001", ctx=_ctx(), include_raw=True)
+        switch.assert_called_with(True)
+
+
+@pytest.mark.asyncio
+async def test_list_application_groups_resolves_names_from_embedded_group():
+    """Default expand=group: names and types come back in the same response, no extra calls."""
+    from okta_mcp_server.tools.audit.audit import list_application_groups
+
+    groups = [
+        {"id": "00g1", "priority": 0, "lastUpdated": "2025-01-01T00:00:00.000Z", "profile": {},
+         "_embedded": {"group": {"id": "00g1", "type": "OKTA_GROUP", "profile": {"name": "Slack Users"}, "_links": {}}}},
+        {"id": "00g2", "priority": 1, "lastUpdated": "2025-01-02T00:00:00.000Z", "profile": {},
+         "_embedded": {"group": {"id": "00g2", "type": "APP_GROUP", "profile": {"name": "Tech Atlas"}}}},
+    ]
+    client, executor = _client_with_pages([(200, groups, None, None)])
+    with patch("okta_mcp_server.tools.audit.audit.get_okta_client", AsyncMock(return_value=client)):
+        result = await list_application_groups(app_id=APP_ID, ctx=_ctx())
+
+    assert executor.create_request.await_args.kwargs["url"] == f"/api/v1/apps/{APP_ID}/groups?limit=200&expand=group"
+    assert executor.create_request.await_count == 1
+    assert result["items"] == [
+        {"id": "00g1", "priority": 0, "lastUpdated": "2025-01-01T00:00:00.000Z", "name": "Slack Users", "type": "OKTA_GROUP"},
+        {"id": "00g2", "priority": 1, "lastUpdated": "2025-01-02T00:00:00.000Z", "name": "Tech Atlas", "type": "APP_GROUP"},
+    ]
+    assert "errors" not in result
+
+
+@pytest.mark.asyncio
+async def test_list_application_groups_falls_back_to_get_group_per_id():
+    """Without an embedded group, each unresolved row costs one GET /groups/{id}; failures are reported, not fatal."""
+    from okta_mcp_server.tools.audit.audit import list_application_groups
+
+    groups = [{"id": "00g1", "priority": 0}, {"id": "00g2", "priority": 1}]
+    client, executor = _client_with_pages([
+        (200, groups, None, None),
+        (200, {"id": "00g1", "type": "OKTA_GROUP", "profile": {"name": "Structured Capital", "description": ""}}, None, None),
+        (404, "", None, "Not found"),
+    ])
+    with patch("okta_mcp_server.tools.audit.audit.get_okta_client", AsyncMock(return_value=client)):
+        result = await list_application_groups(app_id=APP_ID, ctx=_ctx(), expand=None)
+
+    urls = [c.kwargs["url"] for c in executor.create_request.await_args_list]
+    assert urls == [f"/api/v1/apps/{APP_ID}/groups?limit=200", "/api/v1/groups/00g1", "/api/v1/groups/00g2"]
+    assert result["items"][0] == {"id": "00g1", "priority": 0, "name": "Structured Capital", "type": "OKTA_GROUP"}
+    assert result["items"][1] == {"id": "00g2", "priority": 1}
+    assert result["errors"] == [{"group_id": "00g2", "error": "Not found"}]
+
+
+def test_extract_after_cursor_reads_every_link_header():
+    """Okta sends self and next as separate Link headers; aiohttp .get() only returns the first."""
+    from multidict import CIMultiDict, CIMultiDictProxy
+
+    from okta_mcp_server.utils.pagination import extract_after_cursor
+
+    headers = CIMultiDict()
+    headers.add("Link", '<https://example.invalid/api/v1/apps?limit=2>; rel="self"')
+    headers.add("Link", '<https://example.invalid/api/v1/apps?after=0oaNEXT&limit=2>; rel="next"')
+    resp = MagicMock(spec=["status", "headers"])
+    resp.status = 200
+    resp.headers = CIMultiDictProxy(headers)
+
+    assert extract_after_cursor(resp) == "0oaNEXT"

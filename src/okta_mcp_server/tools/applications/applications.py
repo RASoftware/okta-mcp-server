@@ -52,7 +52,11 @@ from okta_mcp_server.utils.pagination import build_query_params, create_paginate
 from okta_mcp_server.utils.raw_request import build_url, raw_get
 from okta_mcp_server.utils.scope_guard import require_scopes
 from okta_mcp_server.utils.serialization import json_response, none_body_error
+from okta_mcp_server.utils.tolerant_deserialization import set_include_raw_items
 from okta_mcp_server.utils.validation import validate_ids
+
+#: Okta's maximum page size for GET /api/v1/apps.
+_APPS_MAX_PAGE_SIZE = 200
 
 
 @mcp.tool()
@@ -68,13 +72,15 @@ async def list_applications(
     include_non_deleted: Optional[bool] = None,
     fetch_all: bool = False,
     compact: bool = True,
+    include_raw: bool = False,
 ) -> dict:
     """List all applications from the Okta organization.
 
     Parameters:
         q (str, optional): Searches for applications by label, property, or link
         after (str, optional): Specifies the pagination cursor for the next page of results
-        limit (int, optional): Specifies the number of results per page (min 20, max 100)
+        limit (int, optional): Number of results per page, 1 to 200 (Okta's default is 20).
+            With fetch_all=True this is the page size; it defaults to 200 to minimise calls.
         filter (str, optional): Filters applications by status, user.id, group.id, or credentials.signing.kid
         expand (str, optional): Expands the app user object to include the user's profile or expand the app group
         object to include the group's profile
@@ -84,6 +90,9 @@ async def list_applications(
             signOnMode, status, features, created, lastUpdated, visibility.hide and, for
             BOOKMARK apps, settings.app.url. Pass compact=False for full application objects,
             or call get_application(app_id) for one app.
+        include_raw (bool, optional): If True, each entry in ``warnings`` also carries the
+            app's full raw Okta payload as ``raw_item`` (credentials, _links, settings).
+            Default False: the trimmed item in ``items`` already has ``parse_error``.
 
     Examples:
         For pagination:
@@ -104,19 +113,27 @@ async def list_applications(
         - pagination_info: Additional pagination metadata (when fetch_all=True)
         - errors: Present only when fetch_all hit a failing page; the pages fetched
           before it are still in items and next_cursor is the resume point.
+        - warnings: Present only when the Okta SDK could not parse some items; one short
+          entry per item (model, error summary). Add include_raw=True for raw payloads.
     """
     logger.info("Listing applications from Okta organization")
     logger.debug(f"Query parameters: q='{q}', filter='{filter}', limit={limit}, fetch_all={fetch_all}, compact={compact}")
 
-    # Validate limit parameter range
+    # RA Capital fork: pass the caller's limit straight through. Upstream raised
+    # anything under 20 to 20, so limit=2 quietly returned 20 items; Okta accepts
+    # any page size from 1 to 200 on this endpoint.
     if limit is not None:
-        if limit < 20:
-            logger.warning(f"Limit {limit} is below minimum (20), setting to 20")
-            limit = 20
-        elif limit > 100:
-            logger.warning(f"Limit {limit} exceeds maximum (100), setting to 100")
-            limit = 100
+        if limit < 1:
+            logger.warning(f"Limit {limit} is below minimum (1), setting to 1")
+            limit = 1
+        elif limit > _APPS_MAX_PAGE_SIZE:
+            logger.warning(f"Limit {limit} exceeds maximum ({_APPS_MAX_PAGE_SIZE}), setting to {_APPS_MAX_PAGE_SIZE}")
+            limit = _APPS_MAX_PAGE_SIZE
+    elif fetch_all:
+        # Walking the whole org: biggest pages means fewest API calls.
+        limit = _APPS_MAX_PAGE_SIZE
 
+    set_include_raw_items(include_raw)
     manager = ctx.request_context.lifespan_context.okta_auth_manager
 
     try:

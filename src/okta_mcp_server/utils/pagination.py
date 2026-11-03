@@ -29,7 +29,15 @@ def extract_after_cursor(response) -> Optional[str]:
     if response and hasattr(response, "headers") and response.headers:
         link_header = ""
         try:
-            link_header = response.headers.get("Link", "") or response.headers.get("link", "")
+            headers = response.headers
+            # RA Capital fork: Okta sends rel="self" and rel="next" as two
+            # separate Link headers. aiohttp's multidict .get() returns only
+            # the first (self), which made raw-JSON pagination stop after page
+            # one; join every Link value when the header object supports it.
+            if hasattr(headers, "getall"):
+                link_header = ", ".join(headers.getall("Link", []) or headers.getall("link", []))
+            else:
+                link_header = headers.get("Link", "") or headers.get("link", "")
         except Exception:
             for key in response.headers:
                 if key.lower() == "link":
